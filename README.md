@@ -122,7 +122,7 @@ The accept-but-not-enforce behavior is mechanistically conclusive: the cap lives
 scp scripts/spark2-capture.sh spark2:/tmp/
 ssh spark2 'bash /tmp/spark2-capture.sh'
 # Stash the resulting tarball off-node:
-scp spark2:~/spark2-wedge-evidence-*.tar.gz NAS_HOST:/mnt/NAS1Pool/wedge-evidence/
+scp spark2:~/spark2-wedge-evidence-*.tar.gz NAS_HOST:/path/to/storage/wedge-evidence/
 ```
 
 **Primary fix — AC cold drain:**
@@ -617,7 +617,7 @@ curl -s http://SPARK2_IP:8000/v1/chat/completions \
 Both nodes should be in the LiteLLM LB pool for fast/reasoning/code. Config on LITELLM_HOST:
 
 ```yaml
-# In /home/USER/panopticon/panopticon-p1/litellm/config.yaml
+# In LITELLM_CONFIG_PATH (e.g. /home/USER/litellm/config.yaml)
 # spark1 entries
 - model_name: fast
   litellm_params:
@@ -671,7 +671,7 @@ Both nodes should be in the LiteLLM LB pool for fast/reasoning/code. Config on L
 
 After updating, restart LiteLLM and verify routing:
 ```bash
-ssh LITELLM_HOST 'cd /home/USER/panopticon/panopticon-p1 && docker compose restart litellm'
+ssh LITELLM_HOST 'cd LITELLM_COMPOSE_DIR && docker compose restart litellm'
 
 # Test through LiteLLM gateway
 curl -s http://LITELLM_HOST_IP:4000/v1/chat/completions \
@@ -817,9 +817,9 @@ The gap is purely memory budget, not kernel efficiency.
    backends before running isolated benchmarks:
    ```bash
    # On LITELLM_HOST: comment out spark api_base lines, restart litellm
-   sed -i 's|api_base: http://172.16.200|# PAUSED api_base: http://172.16.200|g' \
-     ~/panopticon/panopticon-p1/litellm/config.yaml
-   cd ~/panopticon/panopticon-p1 && docker compose restart panopticon_litellm
+    sed -i 's|api_base: http://172.16.200|# PAUSED api_base: http://172.16.200|g' \
+      LITELLM_CONFIG_PATH
+    cd LITELLM_COMPOSE_DIR && docker compose restart litellm
    # After bench: remove "# PAUSED " prefix and restart again
    ```
 
