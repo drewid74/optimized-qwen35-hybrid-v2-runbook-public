@@ -70,8 +70,9 @@ Three optimizations stacked on Intel AutoRound INT4 baseline:
 | Launch flag | MTP-2 speculative decoding (2 tokens/step, ~95% acceptance) | +25% |
 | Launch flag | FlashInfer attention backend (native SM121 kernels) | +16% |
 
-Single-node result: **52 tok/s** on Founders, **34 tok/s** on GX10, at 262K context (0.85 GMU).
-Upstream ceiling: 51 tok/s (measured on GX10 at 0.90 GMU by author).
+Single-node result (post-wedge-fix, 2026-06-16): **~52 tok/s** on Founders, **~53 tok/s** on GX10, at 262K context (0.85 GMU).
+Upstream ceiling: 51.6 tok/s (albond reference, GX10 at 0.90 GMU) — both nodes now match or exceed this at 0.85 GMU.
+*Prior reading (pre-fix): GX10 was stuck at ~34 tok/s due to a PD firmware wedge pinning the GPU at 702 MHz / 10W. See [Known Firmware Issues](#known-firmware-issues) for diagnosis and the cold-drain fix.*
 
 ### Optimization Stack (cumulative, from upstream spec):
 | # | Optimization | Effect | Status |
