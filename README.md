@@ -1,5 +1,9 @@
 # Qwen3.5-122B Hybrid v2 — Deployment Runbook
 
+This runbook was produced while deploying and validating [albond's optimization stack](https://github.com/albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4#optimization-5-vllm-pr-38325-swapab-sm120-fp8-gemm) on two DGX Spark GB10 units — an **NVIDIA DGX Spark Founders Edition** and an **ASUS Ascent GX10**. It documents the full build process, optimization layers, hardware-specific quirks (including an ASUS GX10 PD firmware wedge that caused a 33% throughput gap), and validated bench results on both units.
+
+Base recipe: [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4)
+
 > **Note:** This is a sanitized copy for sharing. IPs replaced with SPARK1_IP/SPARK2_IP/LITELLM_HOST_IP.
 > Internal hostnames replaced with LITELLM_HOST/NAS_HOST. User paths replaced with USER.
 
