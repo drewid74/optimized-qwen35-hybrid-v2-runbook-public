@@ -726,6 +726,32 @@ Expected results per node (single-stream, LiteLLM paused, warm-cache run 2+):
 
 Both nodes now match or exceed albond's published upstream ceiling. The prior 34 vs 52 gap was entirely due to the ASUS GX10 PD firmware wedge pinning the GPU at 702 MHz / 10W (see Known Firmware Issues section). After 10-minute cold drain, spark2 recovered to full clock state and outperforms spark1 by ~1.3 tok/s mean.
 
+### MTP-2 vs MTP-3 Isolated Comparison (2026-06-16)
+
+Re-tested `--speculative-config` token counts after observing that prior comparisons were contaminated by concurrent LiteLLM traffic. Both nodes were drained from the LiteLLM `fast`/`reasoning`/`code` pools for the duration of each measurement (verified zero in-flight requests via `vllm:num_requests_running == 0.0`), then immediately restored.
+
+Bench harness: 4 phases per (node × config) = 16 total measurements:
+
+1. **single-stream probe** — 5 fixed prompts × 256 max_tokens, sequential
+2. **loaded probe** — 8 parallel requests × 128 max_tokens (aggregate tok/s under load)
+3. **NVIDIA tool-eval-bench `--short` sequential** — 15 scenarios, single client
+4. **NVIDIA tool-eval-bench `--short --parallel 4`** — 15 scenarios, 4 concurrent
+
+| Phase | spark1 MTP-2 | spark1 MTP-3 | spark2 MTP-2 | spark2 MTP-3 |
+|---|---|---|---|---|
+| single-stream tok/s | 43.12 | 45.08 | **49.65** | 45.31 |
+| loaded N=8 aggregate tok/s | 54.11 | 58.64 | **79.91** | 60.13 |
+| `--short` sequential score | 73/100 (11p/4f) 84.9s | 60/100 (9p/6f) 73.5s | 80/100 (12p/3f) 88.0s | 87/100 (13p/2f) 84.4s |
+| `--short --parallel 4` score | 73/100 (11p/4f) **59.2s** | 87/100 (13p/2f) 72.6s | 80/100 (12p/3f) 71.7s | 80/100 (12p/3f) 67.8s |
+
+**Verdict: MTP-2 chosen on both nodes.** spark2 was the decisive node — MTP-3 lost 9.6% single-stream and **32.9%** on loaded N=8 throughput. spark1 showed mixed throughput (MTP-3 nominally higher but loaded delta was only +8% and well within run variance). Quality scores via tool-eval-bench `--short` ran 60-87/100 across same-config repeats — too noisy at N=15 scenarios to differentiate the configs.
+
+The earlier "40% MTP-2 regression without INT8 LM Head" claim documented in the optimization stack table was a contaminated measurement (made while the node was serving LiteLLM traffic). Isolated MTP-2 throughput is solidly competitive at 43-50 tok/s single-stream and 54-80 tok/s aggregate at N=8.
+
+Toggle script (both nodes): `python3 ~/toggle_mtp.py {2|3}` patches `docker-compose.yml` and re-validates. Recreate the container with `cd ~/vllm && docker compose up -d --force-recreate`. Allow ~10 minutes for cold boot (spec-decode artifact rebuild dominates).
+
+Raw result JSONs: see `eqi12:/tmp/bench_results_{spark1,spark2}-mtp{2,3}.json` (operator's eqi12 ingest node).
+
 ### Community Env Var A/B Testing (2026-06-15)
 
 All tested on spark1 in isolation (LiteLLM paused). Baseline: 47.5 tok/s (pre-v2 image; current v2 image is ~52 tok/s).
