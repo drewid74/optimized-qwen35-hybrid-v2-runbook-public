@@ -12,14 +12,15 @@ Base recipe: [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/alb
 > **Node legend:** `SPARK1_IP` = spark1 — NVIDIA DGX Spark Founders Edition (GB10). `SPARK2_IP` = spark2 — ASUS Ascent GX10 (GB10). `LITELLM_HOST_IP` = LiteLLM gateway host.
 
 
-**Current state (2026-06-16):** Production — spark1 at **~52 tok/s**, spark2 at **~53 tok/s** (post-PD-wedge cold-drain fix).
-**Target ceiling:** ~51.6 tok/s/node (albond reference, GX10 at 0.90 GMU) — **both nodes now exceed this at 0.85 GMU**
+**Current state (2026-06-18):** Production — spark1 at **~52 tok/s**, spark2 at **~53 tok/s** (post-PD-wedge cold-drain fix).
+**Target ceiling:** ~51.6 tok/s/node (albond reference, GX10 at 0.90 GMU) — **both nodes now exceed this at 0.80 GMU**
 **Achieved:** 52 tok/s on Founders, 53 tok/s on GX10 (post-wedge-fix)
 **Source:** [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4)
 **Build path:** `eugr/spark-vllm-docker` at commit `49d6d9f` → `build-and-copy.sh` (NOT install.sh)
-**Last updated:** 2026-06-16 (eugr direct build, autotune + PR #38325 + starlette fix)
+**Last updated:** 2026-06-18 (vLLM pinned to 2a69949bd; GMU lowered 0.85→0.80; crash-loop recovery documented)
 **ob1 memories:** *(internal, omitted)*
-**GMU note:** 0.85 is the validated ceiling for both nodes. 0.90 fails with ValueError on both.
+**GMU note:** 0.80 is the safe production value for both nodes. GB10 CUDA driver permanently consumes ~22 GiB leaving ~99 GiB free; 0.85 × 121.69 = 103.44 GiB exceeds available after crash-loop residue accumulates. 0.80 × 121.69 = 97.35 GiB fits safely. 0.85 works only if node started clean with minimal driver overhead. 0.90 fails on both nodes.
+**vLLM version pin:** `2a69949bd` (`0.19.1.dev0+g2a69949bd.d20260616`) — pinned in `Dockerfile` and `build-and-copy.sh`. Do NOT track `main`; newer builds have stricter `request_memory()` that fails at 0.85 on GB10.
 **Key fix:** Starlette 1.x breaks vLLM 0.19 router — must pin `starlette<1.0` + `fastapi<0.116`.
 **Torch triple (stable cu130, verified in container):**
 ```
@@ -329,7 +330,7 @@ COPY local-pr38325.diff /tmp/local-pr38325.diff\
 RUN git apply -v /tmp/local-pr38325.diff && rm /tmp/local-pr38325.diff' Dockerfile
 
 # Build (-j 8 is safe on GB10 during Docker build, only JIT inference OOMs)
-./build-and-copy.sh -t vllm-sm121 --vllm-ref v0.19.0 --tf5 -j 8
+./build-and-copy.sh -t vllm-sm121 --vllm-ref 2a69949bd --tf5 -j 8
 ```
 
 **Time:** ~15 min on Founders (fast NVMe), ~90 min on GX10.
@@ -794,7 +795,7 @@ docker run --rm --entrypoint bash vllm-qwen35-v2:latest \
 # Image built 2026-06-14, includes:
 # - patches/01-hybrid-int4-fp8/inc.py (INC quantization)
 # - patches/03-int8-lm-head/patch_int8_lmhead.py (INT8 LM Head v2)
-# - vllm-ref v0.19.0, transformers 5.10.2, NCCL 2.30.4, Triton 3.7.0
+# - vllm-ref 2a69949bd (0.19.1.dev0+g2a69949bd.d20260616, pinned 2026-06-18), transformers 5.10.2, NCCL 2.30.4, Triton 3.7.0
 # - SM121 CUDA arch (12.1a)
 ```
 
@@ -859,6 +860,10 @@ The gap is purely memory budget, not kernel efficiency.
    ```
    Restoring these skips the 30-45 min compilation entirely on fresh deploys.
 
+9. **Pin `VLLM_REF` to `2a69949bd` — do not track `main`.** vLLM nightlies after this commit have a stricter `request_memory()` check that fails at 0.85 GMU on GB10 because the CUDA driver permanently reserves ~22 GiB (leaving ~99 GiB free, below the 103.44 GiB that 0.85 × 121.69 requires). The working image is `0.19.1.dev0+g2a69949bd.d20260616.cu132`. Pin in both `Dockerfile` (`ARG VLLM_REF=2a69949bd`) and `build-and-copy.sh` (`VLLM_REF="2a69949bd"`). Do NOT update without re-testing the memory check passes.
+
+10. **Use `--gpu-memory-utilization 0.80`, not 0.85 or 0.90.** 0.80 × 121.69 = 97.35 GiB — fits safely within the ~99 GiB available after CUDA driver overhead. 0.85 works only on a node that started completely clean (fresh boot, no prior crash residue). After any crash-loop, driver overhead grows; 0.85 will fail. 0.90 fails on both nodes regardless. nvidia-smi does not report memory on GB10 (all fields N/A) — read free/total from vLLM's own startup log instead.
+
 ## Rollback
 
 ```bash
@@ -910,9 +915,10 @@ If rebuilding the image, the authoritative upstream inc.py (`~/DGX_Spark_Qwen3.5
 | `/tmp/run-mtp2.sh` not found | Wiped on reboot. Recreate from base64 in Phase 4 "Quick relaunch" section. |
 | Throughput stuck at ~26 tok/s, expected ~47 | Missing MTP-2 (`--speculative-config`), or JIT cache not populated (first boot is slower). Run bench after warmup. |
 | Throughput stuck at ~29-34 tok/s on spark2, spark1 gets ~47-52 | **First check:** PD firmware wedge (see Known Firmware Issues). Run `nvidia-smi --query-gpu=clocks.current.sm --format=csv,noheader` during load — if <1000 MHz, cold-drain is required. **Second check:** stale torch_compile cache — wipe `~/.cache/vllm` with sudo, relaunch. |
-| Throughput stuck at ~36 tok/s, expected ~51 | GMU 0.85 vs 0.90 gap — this is expected. See Performance Gap section. |
+| Throughput stuck at ~36 tok/s, expected ~51 | GMU 0.80 vs 0.90 gap — this is expected. See Performance Gap section. |
 | Two nodes show very different memory usage on htop | Older node likely has fragmentation/page cache from prior crashes. **Hard-reset the worse node** to bring them in line. |
 | `weight_scale_inv not found` | Patch 01 not applied — rebuild Docker image |
+| `ValueError: Free memory on device cuda:0 (X/121.69 GiB) less than desired GPU memory utilization (0.85, 103.44 GiB)` | GB10 CUDA driver permanently reserves ~22 GiB. 0.85 × 121.69 = 103.44 GiB fails if crash-loop residue has accumulated. vLLM nightly builds after `2a69949bd` have stricter `request_memory()` that enforces this at startup. Fix: (1) stop + rm container; (2) ensure compose uses `--gpu-memory-utilization 0.80`; (3) restart. If free GPU memory is still < 97 GiB after restart, reboot the node to clear CUDA context residue. nvidia-smi always reports memory N/A on GB10 — read free/total from vLLM's own startup log line. |
 | OOM during FlashInfer JIT | Lower GMU to 0.80, let compilation finish, raise back after cache populated |
 | Only ~17 tok/s (half expected) | Missing `--attention-backend FLASHINFER` flag |
 | Stale Triton cache | `docker exec vllm-qwen35-v2 rm -rf /root/.cache/triton` and restart |
