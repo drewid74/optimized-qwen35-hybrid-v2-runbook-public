@@ -882,6 +882,15 @@ The gap is purely memory budget, not kernel efficiency.
 
 10. **Use `--gpu-memory-utilization 0.80`, not 0.85 or 0.90.** 0.80 × 121.69 = 97.35 GiB — fits safely within the ~99 GiB available after CUDA driver overhead. 0.85 works only on a node that started completely clean (fresh boot, no prior crash residue). After any crash-loop, driver overhead grows; 0.85 will fail. 0.90 fails on both nodes regardless. nvidia-smi does not report memory on GB10 (all fields N/A) — read free/total from vLLM's own startup log instead.
 
+11. **If vLLM fails to start more than once, reboot before retrying.** Each failed startup attempt leaves CUDA context residue that `docker rm` alone cannot clear. The residue accumulates: first failure ~22 GiB driver overhead, after 2-3 crash-loop cycles ~24-26 GiB consumed, eventually nothing fits. Only a clean OS reboot fully resets the GPU memory allocator to baseline. Diagnosis: if `docker logs` shows `num_gpu_blocks=0 with num_gpu_blocks_override=512` followed by a silent EngineCore death (no Python traceback, container restarts), the node is in residue-degraded state. Fix:
+    ```bash
+    ssh <node> 'sudo reboot'
+    # wait ~2 min for SSH to return
+    ssh <node> 'sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"'
+    ssh <node> 'docker compose -f /home/USER/vllm/docker-compose.yml up -d'
+    ```
+    After clean reboot the container should load without hitting the `num_gpu_blocks=0` override.
+
 ## Rollback
 
 ```bash
