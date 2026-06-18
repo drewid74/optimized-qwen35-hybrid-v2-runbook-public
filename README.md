@@ -13,11 +13,11 @@ Base recipe: [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/alb
 
 
 **Current state (2026-06-18):** Production — spark1 at **~52 tok/s**, spark2 at **~53 tok/s** (post-PD-wedge cold-drain fix).
-**Target ceiling:** ~51.6 tok/s/node (albond reference, GX10 at 0.90 GMU) — **both nodes now exceed this at 0.80 GMU**
+**Target ceiling:** ~51.6 tok/s/node (albond reference, GX10 at 0.90 GMU) — **both nodes now exceed this at 0.85 GMU**
 **Achieved:** 52 tok/s on Founders, 53 tok/s on GX10 (post-wedge-fix)
 **Source:** [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4)
 **Build path:** `eugr/spark-vllm-docker` at commit `49d6d9f` → `build-and-copy.sh` (NOT install.sh)
-**Last updated:** 2026-06-18 (vLLM pinned to 2a69949bd; GMU lowered 0.85→0.80; crash-loop recovery documented)
+**Last updated:** 2026-06-18 (vLLM pinned to 2a69949bd; GB10 CUDA graph OOM analysis documented; crash-loop recovery runbook added; spark1 baseline memory discrepancy under investigation)
 **ob1 memories:** *(internal, omitted)*
 **GMU note:** 0.85 is the correct production value on clean boot. 0.85 × 121.69 = 103.44 GiB — after model load (66.93 GiB), 36.5 GiB remains for KV cache + CUDA graph capture (sufficient). 0.80 leaves only 30.4 GiB after model load — CUDA graph capture OOM-kills EngineCore silently. Use 0.80 only as a diagnostic probe to isolate `request_memory()` failures in degraded state. 0.90 fails on both nodes. If `request_memory()` fails at 0.85, the node has crash-loop CUDA residue — reboot it (lesson 11), not lower GMU.
 **vLLM version pin:** `2a69949bd` (`0.19.1.dev0+g2a69949bd.d20260616`) — pinned in `Dockerfile` and `build-and-copy.sh`. Do NOT track `main`; newer builds have stricter `request_memory()` that fails at 0.85 on GB10.
@@ -45,7 +45,7 @@ LiteLLM load-balances across both for fast/reasoning/code pools.
 
 | Node | Hardware | GPU/RAM | Storage | Max GMU | Notes |
 |------|----------|---------|---------|---------|-------|
-| spark1 | NVIDIA DGX Spark (Founders Edition) | GB10 128GB unified | 4TB NVMe | 0.90 | Lower driver overhead (~118 GiB free after Phase 0) |
+| spark1 | NVIDIA DGX Spark (Founders Edition) | GB10 128GB unified | 4TB NVMe | 0.85* | Confirmed baseline ~99 GiB free (NVIDIA firmware overhead). 0.90 fails. *See note. |
 | spark2 | ASUS Ascent GX10 | GB10 128GB unified | 1TB NVMe | 0.87 | Higher driver/firmware overhead (~106 GiB free after Phase 0) |
 
 Both run the same GB10 SoC with 128GB unified memory. Storage difference is irrelevant for inference
@@ -54,6 +54,13 @@ Each node is a fully independent inference endpoint.
 
 **IMPORTANT:** The ASUS GX10 cannot run at 0.90 GMU — the docker launch will fail with
 `ValueError: Free memory (106.0 GiB) < desired (109.46 GiB)`. Use 0.85 GMU on spark2.
+
+**\*spark1 Max GMU note (2026-06-18):** The NVIDIA Founders Edition baseline shows only ~99 GiB free at clean boot
+vs ~103-118 GiB on the GX10. Root cause under investigation (hardware firmware difference between NVIDIA and ASUS
+boards, both running same kernel 6.17.0-1021-nvidia). At ~99 GiB free, 0.85 × 121.69 = 103.44 GiB FAILS the
+`request_memory()` check. Current workaround: spark1 needs either (a) the memory baseline restored to ~103+ GiB
+or (b) a different GMU value. 0.80 passes the check but causes CUDA graph OOM during capture. Do not use 0.80.
+If spark1's memory baseline is not restored, contact NVIDIA or open a NVSM ticket.
 The DGX Spark Founders Edition has ~12 GiB more GPU headroom and can run 0.90.
 
 > **Note:** Phase 4-alt (distributed TP=2) is documented for historical reference only.
@@ -277,11 +284,12 @@ fi
 > **DGX Web Dashboard** (`dgx-dashboard-admin`) stays enabled — it uses
 > minimal memory and provides hardware monitoring via browser.
 >
-> **GB10 memory reality (2026-06-18):** Even after Phase 0 (desktop disabled), the CUDA
-> driver permanently reserves ~22 GiB on GB10 for driver structures (page tables, kernel
-> management). Total CUDA-visible: 121.69 GiB. Available at clean startup: ~99 GiB.
-> This is why GMU is capped at 0.80 (= 97.35 GiB) not 0.85 or 0.90. After a crash-loop,
-> residue accumulates above the 22 GiB baseline — only a node reboot fully clears it.
+> **GB10 memory reality (2026-06-18):** The CUDA driver permanently reserves ~22 GiB on GB10 for driver
+> structures (page tables, kernel management). Total CUDA-visible: 121.69 GiB. The ASUS GX10 (spark2) shows
+> ~103+ GiB free at clean boot, making 0.85 GMU viable. The NVIDIA Founders Edition (spark1) shows only ~99 GiB
+> free — root cause under investigation. After any crash-loop, residue accumulates above the baseline; reboot
+> fully clears it (lesson 11). Do NOT lower GMU to 0.80 as a workaround — it passes `request_memory()` but
+> causes silent EngineCore OOM-kill during CUDA graph capture (see lesson 10).
 
 ### Standard Pre-Flight Checks
 
@@ -448,7 +456,7 @@ docker run -d --name vllm-qwen35-v2 \
 **GMU selection:**
 - `0.90` — FAILS on both nodes (107.82 GiB free < 109.52 needed). Do NOT use.
 - `0.85` — validated production ceiling for both Founders and GX10
-- `0.80` — fallback if OOM during CUDA graph capture
+- `0.80` — **DO NOT USE in production.** Passes `request_memory()` but causes silent EngineCore OOM-kill during CUDA graph capture (30.4 GiB remaining after model load is insufficient for 51-size PIECEWISE graph capture). Useful only as a diagnostic probe.
 
 **IMPORTANT: `--enable-prefix-caching` CRASHES on Qwen3.5** (DeltaNet hybrid attention
 incompatibility in vLLM 0.19). Do NOT add this flag despite community examples using it
