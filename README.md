@@ -17,10 +17,21 @@ Base recipe: [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/alb
 **Achieved:** 52 tok/s on Founders, 53 tok/s on GX10 (post-wedge-fix)
 **Source:** [albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4](https://github.com/albond/DGX_Spark_Qwen3.5-122B-A10B-AR-INT4)
 **Build path:** `eugr/spark-vllm-docker` at commit `49d6d9f` → `build-and-copy.sh` (NOT install.sh)
-**Last updated:** 2026-06-18 (vLLM pinned to 2a69949bd; GB10 CUDA graph OOM analysis documented; crash-loop recovery runbook added; spark1 baseline memory discrepancy under investigation)
+**Last updated:** 2026-06-18 (DEFINITIVE FIX: 6 mandatory env vars — esp. `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1` — resolve the GB10 CUDA-graph-capture OOM. Prior GMU-tuning guidance was a red herring.)
 **ob1 memories:** *(internal, omitted)*
-**GMU note:** 0.85 is the correct production value on clean boot. 0.85 × 121.69 = 103.44 GiB — after model load (66.93 GiB), 36.5 GiB remains for KV cache + CUDA graph capture (sufficient). 0.80 leaves only 30.4 GiB after model load — CUDA graph capture OOM-kills EngineCore silently. Use 0.80 only as a diagnostic probe to isolate `request_memory()` failures in degraded state. 0.90 fails on both nodes. If `request_memory()` fails at 0.85, the node has crash-loop CUDA residue — reboot it (lesson 11), not lower GMU.
-**vLLM version pin:** `2a69949bd` (`0.19.1.dev0+g2a69949bd.d20260616`) — pinned in `Dockerfile` and `build-and-copy.sh`. Do NOT track `main`; newer builds have stricter `request_memory()` that fails at 0.85 on GB10.
+**🔑 MANDATORY ENV VARS (the real fix):** The vLLM container MUST set these 6 environment variables. Their absence is what caused the `num_gpu_blocks=0` → silent EngineCore OOM-kill during CUDA graph capture / FlashInfer warmup:
+```
+MAX_JOBS=2                                  # throttle FlashInfer JIT (unthrottled = 20-32 cicc procs ×1-4GB → OOM on GB10 unified mem)
+FLASHINFER_NVCC_THREADS=1                   # same
+VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1  # ★ CRITICAL: estimate (not CAPTURE) CUDA graph mem during profiling. Without it vLLM captures graphs → consumes all headroom → num_gpu_blocks=0 → warmup OOM
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+VLLM_MARLIN_USE_ATOMIC_ADD=1               # ~+5-7 tok/s
+VLLM_USE_FLASHINFER_SAMPLER=0              # sampler compat
+```
+With these set, **256K context (262144) + 0.85 GMU works on BOTH nodes** (spark1 verified: 268,224 KV tokens, 3.81x concurrency). `enforce-eager` is NOT needed. The DGX Spark (spark1, NVIDIA Founders) REQUIRES these vars; the GX10 (spark2, ASUS) tolerates their absence due to different firmware.
+**GMU note:** 0.85 is correct on a clean boot WITH the env vars above. Do NOT chase GMU down to 0.80 to "fix" OOM — that was a misdiagnosis; the OOM is the missing `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`, not insufficient headroom. 0.90 fails the `request_memory()` check on spark1's ~107 GiB clean baseline.
+**Hazards that silently break this:** (1) `earlyoom` (if installed) SIGKILLs EngineCore during warmup memory spike — `apt purge earlyoom`. (2) `nvidia_gpu_exporter` (`--gpus all`) holds ~9 GiB CUDA context — stop it before launch so the memory check sees max free, restart after healthy. (3) GB10 only fully resets the GPU allocator on a true AC power cut (smart-plug), NOT `sudo reboot`/`poweroff` (5VSB standby keeps CUDA state). Each failed launch leaves 1-9 GiB residue.
+**vLLM version pin:** `2a69949bd` (`0.19.1.dev0+g2a69949bd.d20260616`) — pinned in `Dockerfile` and `build-and-copy.sh`. Do NOT track `main`.
 **Key fix:** Starlette 1.x breaks vLLM 0.19 router — must pin `starlette<1.0` + `fastapi<0.116`.
 **Torch triple (stable cu130, verified in container):**
 ```
