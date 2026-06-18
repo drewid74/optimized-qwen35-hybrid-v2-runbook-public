@@ -254,8 +254,20 @@ systemctl get-default
 # Should show <8GB used (no GPU-holding desktop processes)
 free -g | head -2
 
-# Should show 0 compute apps (or only nvidia-persistenced)
+# GPU compute apps — NOTE: on GB10 this returns EMPTY even when 20+ GiB is consumed
+# (unified memory arch; nvidia-smi process tracking is not supported).
+# A clean result here does NOT guarantee free GPU memory on GB10.
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+
+# GB10-specific gate: check which PIDs hold the nvidia device file.
+# nvidia-persistenced (usually PID ~1580) is expected. Anything else = zombie CUDA context.
+PERSISTENCED=$(pgrep nvidia-persistenced)
+UNEXPECTED=$(sudo fuser /dev/nvidia0 2>/dev/null | tr ' ' '\n' | grep -v "^${PERSISTENCED}$" | grep -v '^$')
+if [ -n "$UNEXPECTED" ]; then
+  echo "BLOCKED: PIDs holding GPU device: $UNEXPECTED — stop those processes before launching"
+  echo "If they are stale container PIDs: docker stop <container> && docker rm <container>"
+  echo "If they persist after docker rm: reboot the node to fully clear CUDA context residue"
+fi
 ```
 
 > **Why this matters:** With desktop services running, CUDA reports only
@@ -264,6 +276,12 @@ nvidia-smi --query-compute-apps=pid,used_memory --format=csv
 >
 > **DGX Web Dashboard** (`dgx-dashboard-admin`) stays enabled — it uses
 > minimal memory and provides hardware monitoring via browser.
+>
+> **GB10 memory reality (2026-06-18):** Even after Phase 0 (desktop disabled), the CUDA
+> driver permanently reserves ~22 GiB on GB10 for driver structures (page tables, kernel
+> management). Total CUDA-visible: 121.69 GiB. Available at clean startup: ~99 GiB.
+> This is why GMU is capped at 0.80 (= 97.35 GiB) not 0.85 or 0.90. After a crash-loop,
+> residue accumulates above the 22 GiB baseline — only a node reboot fully clears it.
 
 ### Standard Pre-Flight Checks
 
